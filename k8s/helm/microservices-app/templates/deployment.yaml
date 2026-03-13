@@ -1,0 +1,313 @@
+###############################################################################
+# deployment.yaml — Kubernetes Deployment for user-service and order-service
+#
+# A Deployment manages a ReplicaSet which manages Pods.
+# Hierarchy: Deployment → ReplicaSet → Pods
+#
+# DEPLOYMENT STRATEGY:
+#   RollingUpdate (default): Gradually replaces old pods with new ones.
+#     - maxSurge: how many extra pods can exist during the rollout
+#     - maxUnavailable: how many pods can be unavailable during rollout
+#   Recreate: Kills ALL old pods, then creates new ones. Brief downtime.
+#             Use for stateful apps that can't run multiple versions.
+#
+# ROLLOUT FLOW with RollingUpdate:
+#   1. Create new ReplicaSet with new pod template
+#   2. Scale up new RS (1 pod at a time)
+#   3. Wait for new pod to pass readiness probe
+#   4. Scale down old RS (1 pod at a time)
+#   5. Repeat until all pods are replaced
+#   → At each step, maxSurge and maxUnavailable control the pace.
+#
+# ROLLBACK:
+#   kubectl rollout undo deployment/user-service -n production
+#   helm rollback microservices -n production
+#   → Helm restores the previous revision's values and templates.
+###############################################################################
+
+{{- if .Values.userService.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "microservices-app.labels" . | nindent 4 }}
+    app.kubernetes.io/name: user-service
+    app.kubernetes.io/component: backend
+  annotations:
+    # Trigger rollout when ConfigMap changes (not automatic in K8s).
+    # checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    deployment.kubernetes.io/revision: "1"
+spec:
+  replicas: {{ .Values.userService.replicaCount }}
+
+  selector:
+    matchLabels:
+      {{- include "microservices-app.selectorLabels" (dict "name" "user-service" "releaseName" .Release.Name) | nindent 6 }}
+    # IMPORTANT: selector is IMMUTABLE after creation.
+    # Changing selector labels requires deleting and recreating the Deployment.
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1           # 1 extra pod during rollout
+      maxUnavailable: 0     # Never kill old pod until new pod is ready
+      # With maxUnavailable=0: capacity never drops below desired replicas.
+      # Safer but requires more resources (needs capacity for maxSurge).
+
+  template:
+    metadata:
+      labels:
+        {{- include "microservices-app.selectorLabels" (dict "name" "user-service" "releaseName" .Release.Name) | nindent 8 }}
+        app.kubernetes.io/name: user-service
+        {{- with .Values.global.commonLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # Prometheus scrape annotations (read by prometheus-operator ServiceMonitor
+        # or legacy annotation-based scraping).
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "{{ .Values.userService.containerPort }}"
+        prometheus.io/path: "/metrics"
+
+    spec:
+      serviceAccountName: {{ .Values.userService.serviceAccountName }}
+      # ServiceAccount with IRSA annotation → pod gets temp AWS credentials.
+
+      # Security context at pod level: affects ALL containers.
+      securityContext:
+        runAsNonRoot: true     # Don't run as root. Container UID != 0.
+        runAsUser: 1000
+        runAsGroup: 3000
+        fsGroup: 2000          # Files in mounted volumes owned by this GID.
+        seccompProfile:
+          type: RuntimeDefault # Use container runtime's default seccomp profile.
+
+      # Image pull secret for private ECR (not needed with IRSA + node role).
+      # imagePullSecrets:
+      #   - name: ecr-pull-secret
+
+      containers:
+        - name: user-service
+          image: {{ include "microservices-app.image" (dict
+            "registry" .Values.global.ecrRegistry
+            "repo" .Values.userService.image.repository
+            "tag" (include "microservices-app.imageTag" (dict
+              "serviceTag" .Values.userService.image.tag
+              "global" .Values.global))
+          ) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+
+          ports:
+            - name: http
+              containerPort: {{ .Values.userService.containerPort }}
+              protocol: TCP
+
+          # Container-level security context (overrides pod-level for this container).
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true   # Container FS is read-only. Writes go to volumes.
+            capabilities:
+              drop:
+                - ALL    # Drop ALL Linux capabilities. Re-add only what you need.
+              # add: ["NET_BIND_SERVICE"]  # Only if binding to port < 1024.
+
+          # Environment variables from direct values
+          env:
+            {{- range $key, $val := .Values.userService.env }}
+            - name: {{ $key }}
+              value: {{ $val | quote }}
+            {{- end }}
+            # Downward API: inject pod metadata into env vars.
+            # Useful for logging (which pod/node am I running on?).
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            # Inject shared config
+            - name: SQS_QUEUE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: SQS_QUEUE_URL
+
+          # Env vars injected wholesale from K8s Secrets
+          {{- if .Values.userService.envFromSecrets }}
+          envFrom:
+            {{- range .Values.userService.envFromSecrets }}
+            - secretRef:
+                name: {{ .secretName }}
+            {{- end }}
+          {{- end }}
+
+          {{- include "microservices-app.resources" .Values.userService.resources | nindent 10 }}
+
+          livenessProbe:
+            {{- toYaml .Values.userService.livenessProbe | nindent 12 }}
+
+          readinessProbe:
+            {{- toYaml .Values.userService.readinessProbe | nindent 12 }}
+
+          # Startup probe: only active during startup. Gives more time than
+          # liveness for slow-starting apps (JVM warmup, DB migrations).
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.userService.containerPort }}
+            failureThreshold: 30   # 30 * 10s = 5 min max startup time
+            periodSeconds: 10
+
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp        # Writable temp dir (readOnlyRootFilesystem=true)
+            - name: cache
+              mountPath: /app/cache
+
+      volumes:
+        - name: tmp
+          emptyDir: {}
+          # emptyDir: created fresh when pod starts, deleted when pod ends.
+          # Lives on the node's disk. Use for temp files.
+        - name: cache
+          emptyDir:
+            medium: Memory    # tmpfs: stored in RAM, faster, but counts against memory limit.
+            sizeLimit: 64Mi
+
+      {{- include "microservices-app.topologySpread" .Values.userService.topologySpreadConstraints | nindent 6 }}
+
+      {{- with .Values.userService.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      {{- with .Values.userService.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      {{- with .Values.userService.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      # Graceful shutdown: on SIGTERM, the app has terminationGracePeriodSeconds
+      # to finish in-flight requests before SIGKILL.
+      terminationGracePeriodSeconds: 30
+{{- end }}
+
+---
+
+###############################################################################
+# ORDER SERVICE DEPLOYMENT
+###############################################################################
+
+{{- if .Values.orderService.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "microservices-app.labels" . | nindent 4 }}
+    app.kubernetes.io/name: order-service
+    app.kubernetes.io/component: backend
+spec:
+  replicas: {{ .Values.orderService.replicaCount }}
+
+  selector:
+    matchLabels:
+      {{- include "microservices-app.selectorLabels" (dict "name" "order-service" "releaseName" .Release.Name) | nindent 6 }}
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+
+  template:
+    metadata:
+      labels:
+        {{- include "microservices-app.selectorLabels" (dict "name" "order-service" "releaseName" .Release.Name) | nindent 8 }}
+        app.kubernetes.io/name: order-service
+        {{- with .Values.global.commonLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "{{ .Values.orderService.containerPort }}"
+        prometheus.io/path: "/metrics"
+
+    spec:
+      # No IRSA for order-service in this example — add similarly to user-service if needed.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 2000
+
+      containers:
+        - name: order-service
+          image: {{ include "microservices-app.image" (dict
+            "registry" .Values.global.ecrRegistry
+            "repo" .Values.orderService.image.repository
+            "tag" (include "microservices-app.imageTag" (dict
+              "serviceTag" .Values.orderService.image.tag
+              "global" .Values.global))
+          ) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+
+          ports:
+            - name: http
+              containerPort: {{ .Values.orderService.containerPort }}
+              protocol: TCP
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          env:
+            {{- range $key, $val := .Values.orderService.env }}
+            - name: {{ $key }}
+              value: {{ $val | quote }}
+            {{- end }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+
+          {{- include "microservices-app.resources" .Values.orderService.resources | nindent 10 }}
+
+          livenessProbe:
+            {{- toYaml .Values.orderService.livenessProbe | nindent 12 }}
+
+          readinessProbe:
+            {{- toYaml .Values.orderService.readinessProbe | nindent 12 }}
+
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: tmp
+          emptyDir: {}
+
+      {{- include "microservices-app.topologySpread" .Values.orderService.topologySpreadConstraints | nindent 6 }}
+
+      terminationGracePeriodSeconds: 30
+{{- end }}

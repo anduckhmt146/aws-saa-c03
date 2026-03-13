@@ -1,0 +1,69 @@
+###############################################################################
+# NOTES.txt — Post-install instructions
+# This file is rendered and displayed after: helm install / helm upgrade
+# Useful for showing the user what to do next.
+# Supports Go templating just like other templates.
+###############################################################################
+
+Microservices App deployed successfully!
+
+Release: {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+Chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+App Version: {{ .Chart.AppVersion }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DEPLOYED SERVICES:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{{- if .Values.userService.enabled }}
+  user-service:
+    Internal URL: http://user-service.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.userService.service.port }}
+    Replicas:     {{ .Values.userService.replicaCount }} (HPA: {{ .Values.userService.hpa.minReplicas }}-{{ .Values.userService.hpa.maxReplicas }})
+{{- end }}
+
+{{- if .Values.orderService.enabled }}
+  order-service:
+    Internal URL: http://order-service.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.orderService.service.port }}
+    Replicas:     {{ .Values.orderService.replicaCount }} (HPA: {{ .Values.orderService.hpa.minReplicas }}-{{ .Values.orderService.hpa.maxReplicas }})
+{{- end }}
+
+{{- if .Values.ingress.enabled }}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EXTERNAL ACCESS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  API URL: https://{{ .Values.ingress.host }}
+
+  1. Get the NLB hostname:
+     kubectl get svc -n ingress-nginx ingress-nginx-controller \
+       -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+
+  2. Create a CNAME in Route53:
+     {{ .Values.ingress.host }} → <NLB hostname>
+
+  3. cert-manager will auto-issue a TLS certificate for this host.
+     Watch progress: kubectl get certificate -n {{ .Release.Namespace }}
+{{- end }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+USEFUL COMMANDS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  # Check pod status
+  kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}
+
+  # Check HPA
+  kubectl get hpa -n {{ .Release.Namespace }}
+
+  # View logs
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/name=user-service -f
+
+  # Rollback to previous version
+  helm rollback {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+  # Upgrade with new image tag
+  helm upgrade {{ .Release.Name }} ./helm/microservices-app \
+    -n {{ .Release.Namespace }} \
+    --set global.imageTag=<NEW_TAG> \
+    --atomic --timeout 5m

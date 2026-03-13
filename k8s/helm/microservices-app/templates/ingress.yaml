@@ -1,0 +1,75 @@
+###############################################################################
+# ingress.yaml — Kubernetes Ingress
+#
+# Ingress exposes HTTP/HTTPS routes from outside the cluster to Services.
+# It requires an Ingress Controller (we use ingress-nginx) to actually
+# process the rules — the Ingress object itself is just configuration.
+#
+# INGRESS vs GATEWAY API:
+#   Ingress = older, simpler, widely supported. Limited features.
+#   Gateway API = newer K8s standard (GA in 1.28). More expressive:
+#     HTTPRoute, TCPRoute, GRPCRoute, etc. Better RBAC over routing rules.
+#     Still being adopted; Ingress is fine for most use cases.
+#
+# PATH TYPES:
+#   Prefix     = /api/users matches /api/users, /api/users/123, /api/users/
+#   Exact      = /api/users ONLY matches /api/users (not /api/users/123)
+#   ImplementationSpecific = controller-defined behavior
+#
+# TLS TERMINATION FLOW:
+#   Client → HTTPS to NLB → NLB passes to ingress-nginx pod → TLS terminated
+#   → HTTP to backend Service → HTTP to pod
+#   cert-manager creates a Secret with the TLS cert; Ingress references it.
+###############################################################################
+
+{{- if .Values.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "microservices-app.fullname" . }}-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "microservices-app.labels" . | nindent 4 }}
+  annotations:
+    {{- toYaml .Values.ingress.annotations | nindent 4 }}
+    # The ingressClassName annotation (older method) vs spec.ingressClassName (newer):
+    # Use spec.ingressClassName (below) for K8s 1.18+. The annotation is deprecated.
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  # ingressClassName tells K8s which IngressClass (= which controller) handles this Ingress.
+  # Multiple controllers can coexist (nginx, alb, traefik) — each watches its own class.
+
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host }}
+      secretName: {{ .Values.ingress.tls.secretName }}
+      # cert-manager creates this Secret by reading the cert-manager.io/cluster-issuer
+      # annotation and issuing a Certificate resource for this host.
+      # Secret contains tls.crt and tls.key.
+  {{- end }}
+
+  rules:
+    - host: {{ .Values.ingress.host }}
+      http:
+        paths:
+          {{- range .Values.ingress.rules }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ .service }}
+                port:
+                  number: {{ .port }}
+          {{- end }}
+
+# WHAT HAPPENS WHEN TRAFFIC ARRIVES:
+#   1. DNS: api.example.com → NLB hostname (CNAME in Route53)
+#   2. NLB (L4): forwards TCP to any ingress-nginx pod
+#   3. ingress-nginx: reads TLS secret, terminates SSL
+#   4. Nginx: matches Host header + path → proxies to backend Service ClusterIP
+#   5. kube-proxy: translates ClusterIP → actual pod IP via iptables
+#   6. Pod: receives request
+
+{{- end }}

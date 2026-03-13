@@ -1,0 +1,48 @@
+###############################################################################
+# Chart.yaml — Helm Chart Metadata
+#
+# Every Helm chart must have a Chart.yaml. The fields here are used by:
+#   - 'helm search' to discover and describe the chart
+#   - Dependency resolution (dependencies list sub-charts)
+#   - Versioning: chart version (Chart.yaml) != app version (appVersion)
+#     chart version   = version of the Helm packaging
+#     appVersion      = version of the APPLICATION being packaged
+#     Bump chart version whenever you change templates/values.
+#     Bump appVersion when the application itself changes.
+###############################################################################
+
+apiVersion: v2                  # Helm 3 chart API (v1 was Helm 2)
+name: microservices-app
+description: |
+  Microservices platform running on EKS.
+  Deploys user-service and order-service with Ingress, HPA, and NetworkPolicy.
+  Designed for AWS SAA-C03 exam prep and hands-on K8s learning.
+
+type: application               # "application" or "library"
+                                # library charts contain only named templates
+                                # and cannot be installed standalone.
+
+version: 0.1.0                  # Helm chart version (SemVer)
+appVersion: "1.0.0"             # Application version (informational)
+
+keywords:
+  - microservices
+  - kubernetes
+  - aws
+  - eks
+
+maintainers:
+  - name: lab-maintainer
+    email: devops@example.com
+
+# Sub-chart dependencies.
+# Run 'helm dependency update' to download these into charts/ directory.
+# dependencies:
+#   - name: postgresql
+#     version: "12.x.x"
+#     repository: "https://charts.bitnami.com/bitnami"
+#     condition: postgresql.enabled    # only install if values.postgresql.enabled=true
+#   - name: redis
+#     version: "18.x.x"
+#     repository: "https://charts.bitnami.com/bitnami"
+#     condition: redis.enabled

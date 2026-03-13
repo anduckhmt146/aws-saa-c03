@@ -1,0 +1,38 @@
+version: 0.2
+
+# buildspec.yml — CodeBuild instructions
+# Phases: install → pre_build → build → post_build
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.12
+    commands:
+      - echo "Installing dependencies..."
+      - pip install -r requirements.txt || echo "No requirements.txt"
+
+  pre_build:
+    commands:
+      - echo "Running tests..."
+      - python -m pytest tests/ || echo "No tests found"
+
+  build:
+    commands:
+      - echo "Build started on $(date)"
+      - echo "Building application..."
+      - zip -r app.zip . -x "*.git*" "tests/*"
+
+  post_build:
+    commands:
+      - echo "Build completed on $(date)"
+      - aws s3 cp app.zip s3://$ARTIFACT_BUCKET/builds/$CODEBUILD_BUILD_ID/app.zip
+
+artifacts:
+  files:
+    - app.zip
+    - appspec.yml
+  discard-paths: no
+
+cache:
+  paths:
+    - '/root/.pip/**/*'

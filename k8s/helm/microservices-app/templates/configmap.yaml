@@ -1,0 +1,71 @@
+###############################################################################
+# configmap.yaml — Kubernetes ConfigMap
+#
+# ConfigMaps store non-sensitive configuration as key-value pairs.
+# Injected into pods as:
+#   1. Environment variables (envFrom: configMapRef or env[].valueFrom)
+#   2. Files mounted as volumes (useful for config files, nginx.conf, etc.)
+#   3. Command-line arguments
+#
+# ConfigMap vs Secret:
+#   ConfigMap = plain text. For non-sensitive config (feature flags, URLs).
+#   Secret     = base64-encoded (NOT encrypted by default!). For passwords, keys.
+#   With KMS envelope encryption on EKS (lab 37), Secrets ARE encrypted at rest.
+#   In production: use AWS Secrets Manager + external-secrets-operator,
+#   not K8s Secrets directly. K8s Secrets in etcd are base64 — not safe alone.
+#
+# HOT RELOAD:
+#   When a ConfigMap changes:
+#   - Env vars: NOT updated until pod restarts (rollout required)
+#   - Volume mounts: Updated automatically within ~1 minute (kubelet syncs)
+#   Apps that watch config files (e.g., Nginx, Envoy) can hot-reload without restart.
+###############################################################################
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "microservices-app.labels" . | nindent 4 }}
+data:
+  # Application settings (referenced by pods via envFrom or env[].valueFrom)
+  APP_ENV: {{ .Values.global.environment | quote }}
+  CLUSTER_NAME: {{ .Values.global.clusterName | quote }}
+  SQS_QUEUE_URL: {{ .Values.global.sqsQueueUrl | quote }}
+  S3_BUCKET_NAME: {{ .Values.global.s3BucketName | quote }}
+
+  {{- range $key, $val := .Values.configMap.data }}
+  {{ $key }}: {{ $val | quote }}
+  {{- end }}
+
+  # Multi-line config file embedded in ConfigMap.
+  # Mounted as a file at /app/config/app.json
+  app.json: |
+    {
+      "environment": {{ .Values.global.environment | quote }},
+      "services": {
+        "userService": {
+          "endpoint": "http://user-service:{{ .Values.userService.service.port }}"
+        },
+        "orderService": {
+          "endpoint": "http://order-service:{{ .Values.orderService.service.port }}"
+        }
+      },
+      "observability": {
+        "tracingEnabled": true,
+        "metricsEnabled": true
+      }
+    }
+  # Pods mount this ConfigMap as a volume:
+  # volumeMounts:
+  #   - name: config
+  #     mountPath: /app/config
+  # volumes:
+  #   - name: config
+  #     configMap:
+  #       name: app-config
+  #       items:
+  #         - key: app.json
+  #           path: app.json

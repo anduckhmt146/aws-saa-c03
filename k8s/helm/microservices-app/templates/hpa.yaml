@@ -1,0 +1,131 @@
+###############################################################################
+# hpa.yaml — Horizontal Pod Autoscaler
+#
+# HPA automatically scales the number of pod replicas based on observed metrics.
+#
+# SCALING ALGORITHM:
+#   desiredReplicas = ceil(currentReplicas × (currentMetricValue / desiredMetricValue))
+#
+#   Example: 3 pods, current avg CPU = 90%, target = 70%
+#   desiredReplicas = ceil(3 × (90 / 70)) = ceil(3.857) = 4 pods
+#
+#   Scale-up is fast (every 15s evaluation cycle, 3 min stabilization window).
+#   Scale-down is conservative (5 min stabilization window by default).
+#   This prevents flapping on temporary traffic spikes.
+#
+# METRICS SOURCES:
+#   1. Resource metrics  - CPU/Memory from metrics-server (built-in)
+#   2. Custom metrics    - app-level metrics via custom metrics API adapter
+#                          (e.g., requests/sec, queue depth via KEDA)
+#   3. External metrics  - outside cluster (SQS queue depth, CloudWatch)
+#
+# KEDA (Kubernetes Event-Driven Autoscaling):
+#   Open-source project that extends HPA with 60+ event sources:
+#   - SQS queue depth → scale order-service workers
+#   - Redis list length → scale cache workers
+#   - Prometheus query → scale on any business metric
+#   - Scale to ZERO when queue is empty (saves cost!)
+#
+# HPA vs VPA (Vertical Pod Autoscaler):
+#   HPA = changes NUMBER of pods (horizontal scale out)
+#   VPA = changes CPU/memory REQUESTS for existing pods (vertical resize)
+#   Don't use both HPA (CPU) and VPA on same deployment — they conflict.
+#   VPA requires pod restart to apply new resource sizes.
+###############################################################################
+
+{{- if and .Values.userService.enabled .Values.userService.hpa.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: user-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "microservices-app.labels" . | nindent 4 }}
+    app.kubernetes.io/name: user-service
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: user-service
+  minReplicas: {{ .Values.userService.hpa.minReplicas }}
+  maxReplicas: {{ .Values.userService.hpa.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.userService.hpa.targetCPUUtilizationPercentage }}
+          # averageUtilization = average CPU usage across all pods as % of request.
+          # If pod requests 100m CPU and uses 70m → 70% utilization.
+          # HPA adds pods when avg > threshold, removes when avg < threshold.
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+          # Memory scaling is less common because memory doesn't release as
+          # quickly as CPU. Be careful — scaling out for memory leaks just
+          # creates more leaky pods. Fix the leak instead.
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60    # Wait 60s before scaling up again
+      policies:
+        - type: Pods
+          value: 2                      # Add at most 2 pods per scaling event
+          periodSeconds: 60
+        - type: Percent
+          value: 100                    # Or double the pods, whichever is smaller
+          periodSeconds: 60
+      selectPolicy: Min                 # Use the policy that adds FEWER pods
+    scaleDown:
+      stabilizationWindowSeconds: 300   # Wait 5 min before scaling down
+      policies:
+        - type: Pods
+          value: 1                      # Remove at most 1 pod per 60s
+          periodSeconds: 60
+      # Conservative scale-down prevents flapping on bursty traffic.
+{{- end }}
+
+---
+
+{{- if and .Values.orderService.enabled .Values.orderService.hpa.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: order-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "microservices-app.labels" . | nindent 4 }}
+    app.kubernetes.io/name: order-service
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: order-service
+  minReplicas: {{ .Values.orderService.hpa.minReplicas }}
+  maxReplicas: {{ .Values.orderService.hpa.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.orderService.hpa.targetCPUUtilizationPercentage }}
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+{{- end }}

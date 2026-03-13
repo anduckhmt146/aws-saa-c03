@@ -1,0 +1,67 @@
+###############################################################################
+# pdb.yaml — Pod Disruption Budget
+#
+# PDB limits voluntary disruptions to maintain availability.
+#
+# VOLUNTARY vs INVOLUNTARY DISRUPTIONS:
+#   Voluntary:    node drain, cluster upgrade, manual pod delete, kubectl drain
+#   Involuntary:  node failure, OOMKill, hardware issues, preemption
+#
+# PDB ONLY protects against voluntary disruptions.
+# Involuntary disruptions (node crash) are handled by the ReplicaSet controller
+# which immediately reschedules the pod on another node.
+#
+# HOW PDB WORKS:
+#   When something (cluster autoscaler, kubelet on drain) tries to evict a pod,
+#   the K8s eviction API checks if the eviction violates any PDB.
+#   If minAvailable would be violated → eviction is BLOCKED until another pod
+#   is available. This prevents all pods from being evicted simultaneously.
+#
+# EXAMPLE (3 pods, minAvailable=2):
+#   Node drain starts → evicts pod A → 2 pods remain (OK, above minAvailable)
+#   Tries to evict pod B → would leave 1 pod (violates minAvailable=2) → BLOCKED
+#   Waits until pod A's replacement is Running + Ready → then evicts pod B.
+#
+# GOTCHA: PDB can BLOCK cluster upgrades if there's nowhere to reschedule pods.
+#   e.g., single-node cluster, minAvailable=1, 1 pod → drain is STUCK forever.
+#   Always ensure cluster has capacity to reschedule before applying PDB.
+###############################################################################
+
+{{- if and .Values.userService.enabled .Values.userService.pdb.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: user-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "microservices-app.labels" . | nindent 4 }}
+    app.kubernetes.io/name: user-service
+spec:
+  minAvailable: {{ .Values.userService.pdb.minAvailable }}
+  # Alternative: maxUnavailable: 1
+  # minAvailable=1 means "at least 1 pod must remain running during disruption."
+  # For replicas=2: effectively means you can only drain/delete 1 at a time.
+  selector:
+    matchLabels:
+      {{- include "microservices-app.selectorLabels" (dict "name" "user-service" "releaseName" .Release.Name) | nindent 6 }}
+{{- end }}
+
+---
+
+{{- if and .Values.orderService.enabled .Values.orderService.pdb.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: order-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "microservices-app.labels" . | nindent 4 }}
+    app.kubernetes.io/name: order-service
+spec:
+  minAvailable: {{ .Values.orderService.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "microservices-app.selectorLabels" (dict "name" "order-service" "releaseName" .Release.Name) | nindent 6 }}
+{{- end }}

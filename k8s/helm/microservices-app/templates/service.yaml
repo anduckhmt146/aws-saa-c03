@@ -1,0 +1,85 @@
+###############################################################################
+# service.yaml — Kubernetes Services
+#
+# A Service gives a stable network endpoint to a dynamic set of pods.
+# Pods come and go (reschedule, scale, rollout) — their IP changes each time.
+# A Service maintains a stable ClusterIP and DNS name, backed by Endpoints
+# that kube-proxy keeps up to date.
+#
+# SERVICE TYPES:
+#   ClusterIP    - Default. Reachable only within the cluster.
+#                  Gets a stable internal IP + DNS: <name>.<namespace>.svc.cluster.local
+#   NodePort     - Opens a port (30000-32767) on every node. Reachable from outside.
+#                  Not suitable for production (bypasses cloud LB, exposes nodes).
+#   LoadBalancer - Provisions an AWS ELB/NLB. One LB per Service (expensive at scale).
+#                  Use Ingress instead for HTTP(S) services.
+#   ExternalName - Creates a CNAME alias to an external DNS name.
+#                  Example: point K8s Service to an RDS endpoint.
+#
+# DNS RESOLUTION INSIDE THE CLUSTER:
+#   Full: user-service.production.svc.cluster.local
+#   Short (same namespace): user-service
+#   Short (cross-namespace): user-service.production
+#
+#   CoreDNS resolves these. K8s injects NDOTS=5 into pod's /etc/resolv.conf,
+#   which causes the pod to try short names with all search domain suffixes
+#   before falling back to FQDN. This can add latency — use FQDNs if needed.
+###############################################################################
+
+{{- if .Values.userService.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "microservices-app.labels" . | nindent 4 }}
+    app.kubernetes.io/name: user-service
+    app.kubernetes.io/component: backend
+  annotations:
+    # Prometheus ServiceMonitor discovery annotation (if not using CRDs)
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "{{ .Values.userService.service.port }}"
+spec:
+  type: {{ .Values.userService.service.type }}
+  selector:
+    # Must match the pod labels set in the Deployment template.
+    # kube-proxy watches these selectors and updates iptables rules.
+    {{- include "microservices-app.selectorLabels" (dict "name" "user-service" "releaseName" .Release.Name) | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.userService.service.port }}         # Service port (what clients connect to)
+      targetPort: http                                       # Named port on the container
+      protocol: TCP
+      # Named targetPort = more flexible than a number.
+      # If the container changes its port, you only update the containerPort
+      # in the Deployment, not every Service referencing it by number.
+  sessionAffinity: None
+  # sessionAffinity: ClientIP  →  sticky sessions (same client → same pod)
+  # sessionAffinity: None      →  round-robin across all pods (default)
+{{- end }}
+
+---
+
+{{- if .Values.orderService.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "microservices-app.labels" . | nindent 4 }}
+    app.kubernetes.io/name: order-service
+    app.kubernetes.io/component: backend
+spec:
+  type: {{ .Values.orderService.service.type }}
+  selector:
+    {{- include "microservices-app.selectorLabels" (dict "name" "order-service" "releaseName" .Release.Name) | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.orderService.service.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}

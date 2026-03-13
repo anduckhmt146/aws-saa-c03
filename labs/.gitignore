@@ -1,0 +1,16 @@
+# Terraform state files (may contain secrets)
+*.tfstate
+*.tfstate.backup
+*.tfstate.lock.info
+
+# Terraform working directory
+.terraform/
+.terraform.lock.hcl
+
+# Lambda zip artifacts
+*.zip
+
+# Credentials / secrets
+*.pem
+*.key
+.env

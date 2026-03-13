@@ -1,0 +1,242 @@
+###############################################################################
+# values.yaml — Default Configuration Values
+#
+# This file is the contract between the chart and its users.
+# Override values at install/upgrade time:
+#   helm install ... --set global.imageTag=v1.2.3
+#   helm install ... --values prod-values.yaml   (full override file)
+#   helm install ... -f staging.yaml -f secrets.yaml  (multiple files, last wins)
+#
+# BEST PRACTICES:
+#   - Document every value with a comment
+#   - Use structured keys (nested maps) not flat dotted keys
+#   - Keep secrets OUT of values.yaml — inject via external-secrets or --set
+#   - Provide sensible defaults so the chart works out-of-the-box
+###############################################################################
+
+# Global values are accessible from all templates including sub-charts.
+# Reference in templates: {{ .Values.global.environment }}
+global:
+  environment: development
+  imageTag: latest
+  ecrRegistry: "123456789012.dkr.ecr.us-east-1.amazonaws.com"
+  clusterName: "saa-c03-eks-lab"
+  domainName: "example.com"
+  sqsQueueUrl: ""
+  s3BucketName: ""
+
+  # Image pull policy:
+  #   Always   = always pull from registry (use in dev to get latest)
+  #   IfNotPresent = use cached image if it exists (default in prod)
+  #   Never    = never pull, image must already be on node
+  imagePullPolicy: IfNotPresent
+
+  # Labels applied to all resources (good for cost attribution, filtering)
+  commonLabels:
+    team: platform
+    managed-by: helm
+
+###############################################################################
+# USER SERVICE
+###############################################################################
+userService:
+  enabled: true
+  replicaCount: 2
+
+  serviceAccountName: user-service  # Must match the K8s ServiceAccount with IRSA
+
+  image:
+    repository: user-service
+    tag: ""      # Empty = use global.imageTag
+    # Full image: {{ .Values.global.ecrRegistry }}/{{ .Values.userService.image.repository }}:{{ coalesce .Values.userService.image.tag .Values.global.imageTag }}
+    # coalesce returns first non-empty value — service-level tag overrides global.
+
+  # Container port the application listens on
+  containerPort: 8080
+
+  service:
+    type: ClusterIP    # ClusterIP = cluster-internal only; Ingress handles external access
+    port: 8080
+
+  resources:
+    # ALWAYS set both requests and limits in production.
+    requests:
+      cpu: "100m"      # 0.1 vCPU
+      memory: "128Mi"
+    limits:
+      cpu: "500m"      # 0.5 vCPU
+      memory: "512Mi"
+
+  # Liveness probe: if this fails, kubelet RESTARTS the container.
+  # Use for deadlock detection. Failing liveness = the pod is broken.
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: 8080
+    initialDelaySeconds: 15   # Wait 15s before first check (app startup time)
+    periodSeconds: 20
+    failureThreshold: 3       # 3 consecutive failures → restart
+
+  # Readiness probe: if this fails, the pod is removed from Service endpoints.
+  # No traffic is sent until the pod is "ready". Use for warmup / dependencies.
+  readinessProbe:
+    httpGet:
+      path: /ready
+      port: 8080
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    failureThreshold: 3
+
+  # Horizontal Pod Autoscaler
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    # When avg CPU across all pods > 70%, add replicas.
+    # When avg CPU < 70%, scale down (with a 5 min cooldown by default).
+
+  # Pod Disruption Budget: maintain availability during voluntary disruptions
+  # (node drain, rolling update, pod eviction).
+  pdb:
+    enabled: true
+    minAvailable: 1   # At least 1 pod must be running at all times.
+    # Alternative: maxUnavailable: 1
+
+  # Environment variables injected into the container
+  env:
+    LOG_LEVEL: "info"
+    PORT: "8080"
+    # Sensitive values (DB_PASSWORD, JWT_SECRET) come from K8s Secrets,
+    # not here. See templates/secret.yaml.
+
+  # Extra env vars from K8s Secrets (envFrom)
+  envFromSecrets:
+    - secretName: user-service-secrets
+      # Items: DB_PASSWORD, JWT_SECRET, etc.
+      # Created by external-secrets-operator syncing from Secrets Manager.
+
+  # Topology spread: distribute pods across AZs for resilience
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: user-service
+
+  # Node selector: only schedule on nodes with specific labels
+  nodeSelector: {}
+  # Example: schedule only on nodes with label environment=production
+  # nodeSelector:
+  #   environment: production
+
+  # Tolerations: allow scheduling on tainted nodes
+  tolerations: []
+
+  # Affinity: advanced scheduling rules
+  affinity: {}
+
+###############################################################################
+# ORDER SERVICE
+###############################################################################
+orderService:
+  enabled: true
+  replicaCount: 2
+
+  image:
+    repository: order-service
+    tag: ""
+
+  containerPort: 8081
+
+  service:
+    type: ClusterIP
+    port: 8081
+
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: 8081
+    initialDelaySeconds: 15
+    periodSeconds: 20
+    failureThreshold: 3
+
+  readinessProbe:
+    httpGet:
+      path: /ready
+      port: 8081
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    failureThreshold: 3
+
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 70
+
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+  env:
+    LOG_LEVEL: "info"
+    PORT: "8081"
+
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: order-service
+
+###############################################################################
+# INGRESS
+# A single Ingress resource routes external traffic to multiple services
+# based on HTTP path or hostname.
+###############################################################################
+ingress:
+  enabled: true
+  className: nginx      # Maps to IngressClass "nginx" installed by ingress-nginx chart
+  host: "api.example.com"
+
+  tls:
+    enabled: true
+    secretName: api-tls   # cert-manager creates this Secret with the TLS cert
+
+  annotations:
+    # Tell cert-manager which Issuer to use for this Ingress's TLS cert
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    # Nginx-specific annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/rate-limit: "100"   # req/min per IP
+
+  # Path routing rules
+  rules:
+    - path: /api/users
+      pathType: Prefix
+      service: user-service
+      port: 8080
+    - path: /api/orders
+      pathType: Prefix
+      service: order-service
+      port: 8081
+
+###############################################################################
+# CONFIG MAP - shared application configuration
+###############################################################################
+configMap:
+  data:
+    APP_ENV: "production"
+    FEATURE_FLAGS: "new-ui=false,dark-mode=true"
