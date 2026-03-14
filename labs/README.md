@@ -25,7 +25,7 @@ Run this **once** to create scoped IAM roles for all 50 labs:
 
 ```bash
 cd labs/
-./create-lab-roles.sh setup
+make setup
 ```
 
 > Each role has only the permissions needed for that lab (least-privilege).
@@ -36,8 +36,8 @@ cd labs/
 ## How to Run Any Lab
 
 ```bash
-# Step 1 — assume the scoped IAM role for the lab
-source ./create-lab-roles.sh session <lab-name>
+# Step 1 — assume the scoped IAM role for the lab (must be sourced)
+source $(make -s session LAB=<lab-name>)
 
 # Step 2 — go into the lab folder
 cd <lab-name>
@@ -58,7 +58,7 @@ terraform destroy
 ### Example — Lab 01 EC2
 
 ```bash
-source ./create-lab-roles.sh session 01-ec2
+source $(make -s session LAB=01-ec2)
 cd 01-ec2
 terraform init && terraform plan
 terraform apply
@@ -73,7 +73,27 @@ The `session` command automatically clears previous credentials before assuming 
 
 ```bash
 # Switch from one lab to another — no manual unset needed
-source ./create-lab-roles.sh session 04-vpc
+source $(make -s session LAB=04-vpc)
+```
+
+---
+
+## Makefile Reference
+
+| Command | Description |
+|---------|-------------|
+| `make setup` | Create all 50 IAM lab roles (run once) |
+| `make cleanup` | Delete all lab roles |
+| `make reset` | Delete and recreate all roles |
+| `make list` | List all roles and their AWS status |
+| `make tag-all` | Tag all existing roles with `Environment=lab` |
+| `make resources` | List all tagged lab resources currently in AWS |
+| `make session LAB=<name>` | Print the source command for a lab session |
+| `make unset` | Print the command to clear session credentials |
+
+```bash
+# See all options
+make help
 ```
 
 ---
@@ -82,18 +102,16 @@ source ./create-lab-roles.sh session 04-vpc
 
 ```bash
 # List all roles and whether they exist in AWS
-./create-lab-roles.sh list
+make list
 
-# Delete all lab roles (cleanup)
-./create-lab-roles.sh cleanup
+# Delete and recreate all roles (if you need a fresh start)
+make reset
 
 # Check current AWS identity
 aws sts get-caller-identity
 
 # See all running lab resources (by tag)
-aws resourcegroupstaggingapi get-resources \
-  --tag-filters Key=Environment,Values=lab \
-  --query 'ResourceTagMappingList[].ResourceARN'
+make resources
 ```
 
 ---

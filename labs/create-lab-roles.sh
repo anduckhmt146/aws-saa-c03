@@ -365,8 +365,16 @@ create_role() {
       --assume-role-policy-document "$TRUST_POLICY" \
       --description "Scoped role for lab $lab" \
       --max-session-duration $DURATION \
+      --tags Key=Environment,Value=lab Key=Lab,Value="$lab" \
       --output text --query 'Role.RoleName' | xargs echo "  Created:"
   fi
+  aws iam tag-role --role-name "$role" \
+    --tags Key=Environment,Value=lab Key=Lab,Value="$lab"
+
+  aws iam put-role-policy \
+    --role-name "$role" \
+    --policy-name "lab-tagging-read" \
+    --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"tag:GetResources","Resource":"*"}]}'
 
   while IFS= read -r policy_arn; do
     [ -z "$policy_arn" ] && continue
@@ -417,6 +425,8 @@ delete_role() {
 
   echo "Deleting role: $role"
 
+  aws iam delete-role-policy --role-name "$role" --policy-name "lab-tagging-read" 2>/dev/null || true
+
   aws iam list-attached-role-policies --role-name "$role" \
     --query 'AttachedPolicies[].PolicyArn' --output text | \
   tr '\t' '\n' | while read -r arn; do
@@ -463,6 +473,22 @@ case "${1:-help}" in
     done
     ;;
 
+  tag-all)
+    echo "Tagging all lab roles (Account: $ACCOUNT_ID)"
+    for lab in $ALL_LABS; do
+      role=$(role_name "$lab")
+      if aws iam get-role --role-name "$role" &>/dev/null; then
+        aws iam tag-role --role-name "$role" \
+          --tags Key=Environment,Value=lab Key=Lab,Value="$lab"
+        echo "  Tagged: $role"
+      else
+        echo "  Role $role not found, skipping."
+      fi
+    done
+    echo "Done. Query with:"
+    echo "  aws resourcegroupstaggingapi get-resources --tag-filters Key=Environment,Values=lab --query 'ResourceTagMappingList[].ResourceARN' --output text"
+    ;;
+
   cleanup)
     echo "Deleting all lab roles (Account: $ACCOUNT_ID)"
     for lab in $ALL_LABS; do
@@ -481,6 +507,7 @@ case "${1:-help}" in
     echo "  ./create-lab-roles.sh setup                    # Create all roles (run once)"
     echo "  source ./create-lab-roles.sh session <lab>     # Export creds for a lab"
     echo "  ./create-lab-roles.sh list                     # List all roles + status"
+    echo "  ./create-lab-roles.sh tag-all                  # Tag all existing roles (Environment=lab)"
     echo "  ./create-lab-roles.sh cleanup                  # Delete all roles"
     echo ""
     echo "Available labs:"
